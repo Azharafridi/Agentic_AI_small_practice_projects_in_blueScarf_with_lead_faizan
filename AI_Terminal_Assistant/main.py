@@ -62,8 +62,8 @@ class CommandPlanner:
             
             command = response.choices[0].message.content.strip()
             
-
-            command = command.replace("```bash", "").replace("```sh", "").replace("```", "").strip()
+            # Clean up markdown if present
+            command = command.replace("```bash", "").replace("```sh", "").replace("```powershell", "").replace("```cmd", "").replace("```", "").strip()
             
             return command
             
@@ -73,44 +73,68 @@ class CommandPlanner:
     
     def _get_llm_prompt(self, user_input: str) -> str:
         """Generate prompt for LLM-based command planning"""
+        shell_info = self._get_shell_info()
+        
         return f"""Convert the following natural language request into a single, safe shell command.
 
 Operating System: {self.os_type}
+Shell: {shell_info}
 User Request: {user_input}
 
 Rules:
 1. Return ONLY the command, no explanations or markdown
-2. Use common, widely-supported commands
+2. Use common, widely-supported commands for {self.os_type}
 3. Prefer read-only operations when possible
 4. Never suggest destructive commands like rm -rf, format, or shutdown
 5. If the request is unclear, return an echo command asking for clarification
-6. Make sure the command is compatible with {self.os_type}
+6. For Windows: Use PowerShell-compatible commands or cmd commands
+7. For Linux/Mac: Use bash-compatible commands
+8. Ensure the command works natively on {self.os_type}
 
 Respond with ONLY the shell command:"""
+    
+    def _get_shell_info(self) -> str:
+        """Get appropriate shell information based on OS"""
+        if self.os_type == "Windows":
+            return "PowerShell/CMD"
+        elif self.os_type == "Darwin":
+            return "bash/zsh (macOS)"
+        else:
+            return "bash"
 
 
 class SafetyChecker:
     """Agent 2: Verifies command safety before execution using OpenAI API"""
     
-
+    # Pre-defined dangerous patterns for fast filtering (cross-platform)
     DANGEROUS_PATTERNS = [
-
-        "rm -rf", "rm -fr", "rm -r", "rmdir /s", "del /s", "format",
-        "mkfs", "dd if=", "shred",
+        # File deletion (Unix/Linux/Mac)
+        "rm -rf", "rm -fr", "rm -r", "shred",
+        # File deletion (Windows)
+        "rmdir /s", "del /s", "del /f", "rd /s", "remove-item -recurse", "format",
+        # Disk operations
+        "mkfs", "dd if=", "fdisk", "parted", "diskpart",
+        # System control (Unix/Linux/Mac)
         "shutdown", "reboot", "init 0", "init 6", "poweroff", "halt",
         "systemctl stop", "systemctl disable",
-        
+        # System control (Windows)
+        "shutdown /s", "shutdown /r", "restart-computer", "stop-computer",
+        # Network/firewall (Unix/Linux/Mac)
         "iptables -F", "iptables -X", "firewall-cmd", "ufw disable",
-        
+        # Network/firewall (Windows)
+        "netsh advfirewall", "disable-netfirewallrule",
+        # Package management (Unix/Linux/Mac)
         "apt-get remove", "yum remove", "dnf remove", "brew uninstall",
         "pip uninstall", "npm uninstall -g",
-        
+        # Permission changes (Unix/Linux/Mac)
         "chmod 777", "chown", "passwd", "useradd", "userdel",
         "sudo su", "su -",
-        
+        # System file modification (Unix/Linux/Mac)
         "> /etc/", "> /sys/", "> /proc/", "> /dev/",
-        
-        "fdisk", "parted", "mkfs", "mount -o remount",
+        # System file modification (Windows)
+        "> c:\\windows", "> c:\\system",
+        # Registry modification (Windows)
+        "reg delete", "remove-item hklm:", "remove-item hkcu:",
     ]
     
     def __init__(self):
@@ -126,6 +150,7 @@ class SafetyChecker:
         """
         command_lower = command.lower().strip()
         
+        # Pre-filter dangerous patterns
         for pattern in self.DANGEROUS_PATTERNS:
             if pattern in command_lower:
                 return (
@@ -134,6 +159,7 @@ class SafetyChecker:
                     f"This could modify or delete system files."
                 )
         
+        # Use LLM for deeper analysis
         try:
             prompt = self._get_llm_prompt(command)
             
@@ -155,6 +181,7 @@ class SafetyChecker:
             
             analysis = response.choices[0].message.content.strip()
             
+            # Parse response
             lines = analysis.split('\n', 1)
             status_line = lines[0].upper()
             explanation = lines[1] if len(lines) > 1 else "No explanation provided."
@@ -182,10 +209,12 @@ Command: {command}
 Check for:
 1. File deletion or system modification (rm, del, format, etc.)
 2. Network or firewall changes
-3. Privilege escalation attempts (sudo, su)
+3. Privilege escalation attempts (sudo, su, runas)
 4. Data overwrites or corruption risks
 5. System shutdown or restart commands
 6. Package removal or system configuration changes
+7. Registry modifications (Windows)
+8. Disk operations
 
 Respond in this exact format:
 Line 1: SAFE, UNSAFE, or UNKNOWN
@@ -201,6 +230,7 @@ class SmartTerminalAssistant:
         self.planner = CommandPlanner()
         self.safety_checker = SafetyChecker()
         self.execution_enabled = True
+        self.os_type = platform.system()
     
     def process_request(self, user_input: str, interactive: bool = True) -> CommandAnalysis:
         """
@@ -228,7 +258,7 @@ class SmartTerminalAssistant:
         elif safety_status == SafetyStatus.UNKNOWN:
             print("\n⚠️  Execution skipped due to safety uncertainty.")
         elif safety_status == SafetyStatus.SAFE and self.execution_enabled:
-
+            # Get user confirmation if in interactive mode
             if interactive:
                 user_approval = self._get_user_confirmation(planned_command)
                 if user_approval:
@@ -279,25 +309,193 @@ class SmartTerminalAssistant:
                 print("\n")
                 return False
     
+    def _get_current_directory(self) -> str:
+        """Get the current working directory safely (cross-platform)"""
+        try:
+            # Use Python's os.getcwd() which is cross-platform
+            return os.getcwd()
+        except Exception as e:
+            # Fallback to subprocess if needed
+            try:
+                if self.os_type == 'Windows':
+                    result = subprocess.run(
+                        'cd',
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
+                else:
+                    result = subprocess.run(
+                        'pwd',
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
+                return result.stdout.strip()
+            except:
+                return "[Unknown directory]"
+    
+    def _enhance_command_output(self, command: str, output: str) -> str:
+        """Enhance output for file/directory creation commands (cross-platform)"""
+        
+        # Keywords that indicate file or directory creation
+        # Unix/Linux/Mac commands
+        unix_keywords = ['touch', 'mkdir', 'echo >', 'cat >', '> ']
+        # Windows commands
+        windows_keywords = ['new-item', 'ni ', 'echo.>', 'type nul >', 'md ', 'mkdir']
+        
+        command_lower = command.lower()
+        
+        # Check if this is a file creation command
+        is_file_creation = (
+            any(keyword in command_lower for keyword in unix_keywords) or
+            any(keyword in command_lower for keyword in windows_keywords)
+        )
+        
+        if is_file_creation:
+            try:
+                cwd = self._get_current_directory()
+                
+                # Extract filename from command
+                filename = self._extract_filename(command)
+                
+                if output == "[Command executed successfully with no output]":
+                    if filename:
+                        full_path = os.path.join(cwd, filename)
+                        # Normalize path for current OS
+                        full_path = os.path.normpath(full_path)
+                        return f"✅ File/directory created successfully!\n📍 Location: {full_path}"
+                    else:
+                        return f"✅ File/directory created successfully!\n📍 Location: {cwd}"
+                else:
+                    return f"{output}\n\n📍 Working Directory: {cwd}"
+            except Exception as e:
+                # If we can't get location info, just return original output
+                pass
+        
+        return output
+    
+    def _extract_filename(self, command: str) -> str:
+        """Extract filename from common file creation commands (cross-platform)"""
+        try:
+            command = command.strip()
+            command_lower = command.lower()
+            
+            # Unix/Linux/Mac commands
+            # Handle touch command
+            if command_lower.startswith('touch '):
+                parts = command.split()
+                if len(parts) >= 2:
+                    return parts[1].strip('"\'')
+            
+            # Handle mkdir command (Unix)
+            elif command_lower.startswith('mkdir '):
+                parts = command.split()
+                if len(parts) >= 2:
+                    # Skip flags like -p
+                    for part in parts[1:]:
+                        if not part.startswith('-'):
+                            return part.strip('"\'')
+            
+            # Windows commands
+            # Handle New-Item (PowerShell)
+            elif 'new-item' in command_lower:
+                # Look for -Path parameter
+                if '-path' in command_lower:
+                    parts = command.split()
+                    for i, part in enumerate(parts):
+                        if part.lower() == '-path' and i + 1 < len(parts):
+                            return parts[i + 1].strip('"\'')
+                # Look for -Name parameter
+                elif '-name' in command_lower:
+                    parts = command.split()
+                    for i, part in enumerate(parts):
+                        if part.lower() == '-name' and i + 1 < len(parts):
+                            return parts[i + 1].strip('"\'')
+                else:
+                    # First argument after New-Item
+                    parts = command.split()
+                    if len(parts) >= 2:
+                        return parts[1].strip('"\'')
+            
+            # Handle echo > file (both Unix and Windows)
+            elif '>' in command and 'echo' in command_lower:
+                parts = command.split('>')
+                if len(parts) >= 2:
+                    filename = parts[-1].strip()
+                    # Remove any trailing commands (like in && chains)
+                    if '&&' in filename:
+                        filename = filename.split('&&')[0].strip()
+                    return filename.strip('"\'')
+            
+            # Handle type nul > file (Windows)
+            elif 'type nul' in command_lower and '>' in command:
+                parts = command.split('>')
+                if len(parts) >= 2:
+                    return parts[-1].strip().strip('"\'')
+            
+            # Handle md/mkdir (Windows CMD)
+            elif command_lower.startswith('md ') or command_lower.startswith('mkdir '):
+                parts = command.split(maxsplit=1)
+                if len(parts) >= 2:
+                    return parts[1].strip('"\'')
+            
+        except Exception as e:
+            print(f"Debug: Error extracting filename: {e}")
+        
+        return ""
+    
     def _execute_command(self, command: str) -> str:
         """
-        Safely execute a shell command and return output.
+        Safely execute a shell command and return output (cross-platform).
         """
         try:
-
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=10  
-            )
+            # Determine the appropriate shell based on OS
+            if self.os_type == 'Windows':
+                # Use PowerShell for Windows (better compatibility)
+                # Check if it's a PowerShell command
+                if command.lower().startswith(('new-item', 'get-', 'set-', 'remove-item', 'copy-item', 'move-item')):
+                    # PowerShell command
+                    shell_command = ['powershell', '-Command', command]
+                    result = subprocess.run(
+                        shell_command,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                else:
+                    # CMD command or generic command
+                    result = subprocess.run(
+                        command,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+            else:
+                # Unix/Linux/Mac - use default shell
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    executable='/bin/bash'  # Explicitly use bash
+                )
             
             output = result.stdout
             if result.stderr:
-                output += f"\n[stderr]: {result.stderr}"
+                # Only include stderr if it looks like an error (not just warnings)
+                stderr = result.stderr.strip()
+                if stderr and result.returncode != 0:
+                    output += f"\n[stderr]: {stderr}"
             
-            return output if output.strip() else "[Command executed successfully with no output]"
+            final_output = output if output.strip() else "[Command executed successfully with no output]"
+            
+            # Enhance output with location info for file operations
+            return self._enhance_command_output(command, final_output)
         
         except subprocess.TimeoutExpired:
             return "[Error]: Command timed out after 10 seconds"
@@ -308,6 +506,7 @@ class SmartTerminalAssistant:
         """Run the assistant in interactive terminal mode"""
         print("\n" + "="*60)
         print("🤖 Smart Terminal Assistant (OpenAI-Powered)")
+        print(f"💻 Running on: {self.os_type}")
         print("="*60)
         print("\nType your requests in natural language.")
         print("Commands are verified for safety before execution.")
@@ -339,6 +538,7 @@ def main():
         assistant = SmartTerminalAssistant()
         
         print("\n🤖 Smart Terminal Assistant (AI-Powered)")
+        print(f"💻 Detected OS: {platform.system()}")
         print("="*60)
         
         show_demo = input("\nWould you like to see example demonstrations? (yes/no): ").strip().lower()
@@ -347,12 +547,20 @@ def main():
             print("\n🎯 Running Example Demonstrations:\n")
             print("Note: Demonstrations will ask for confirmation before execution.\n")
             
-            examples = [
-                "Show me how much space my disk is using.",
-                "List all running Python processes.",
-                "What is my current working directory?",
-                "Show me my IP address",
-            ]
+            # OS-specific examples
+            if platform.system() == 'Windows':
+                examples = [
+                    "Show me the current directory",
+                    "List all files in the current folder",
+                    "Create a test.txt file",
+                ]
+            else:
+                examples = [
+                    "Show me how much space my disk is using",
+                    "List all running Python processes",
+                    "What is my current working directory?",
+                    "Create a test.txt file",
+                ]
             
             for example in examples:
                 assistant.process_request(example, interactive=True)
