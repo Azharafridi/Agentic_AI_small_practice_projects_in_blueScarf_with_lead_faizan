@@ -22,9 +22,9 @@ class DualAgentChatbot:
                 raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
         
         self.client = OpenAI(api_key=api_key)
-        self.model = "gpt-3.5-turbo"
+        self.model = "gpt-4o-mini"
         
-        # Define agent personalities
+
         self.optimist_system = """You are an Optimist Agent. Your role is to:
 - Always look on the bright side of things
 - Find positive aspects and opportunities in every situation
@@ -104,14 +104,12 @@ class DualAgentChatbot:
         print("PROCESSING YOUR QUESTION...")
         print("="*70)
         
-        # Get initial responses
         print("\n🌟 Optimist Agent is thinking...")
         optimist_response = self.get_optimist_response(question)
         
         print("🎯 Realist Agent is thinking...")
         realist_response = self.get_realist_response(question)
         
-        # Display initial responses
         print("\n" + "-"*70)
         print("INITIAL RESPONSES")
         print("-"*70)
@@ -122,7 +120,6 @@ class DualAgentChatbot:
         print("\n🎯 REALIST AGENT:")
         print(f"   {realist_response}")
         
-        # Have them debate each other
         print("\n" + "-"*70)
         print("DEBATE")
         print("-"*70)
@@ -156,8 +153,7 @@ def print_welcome():
 def main():
     """Main function to run the chatbot"""
     print_welcome()
-    
-    # Initialize chatbot
+
     try:
         chatbot = DualAgentChatbot()
     except ValueError as e:
@@ -168,25 +164,24 @@ def main():
     except Exception as e:
         print(f"\n❌ Error initializing chatbot: {str(e)}")
         return
-    
-    # Main conversation loop
+
     while True:
         try:
-            # Get user input
+ 
             print("\n" + "-"*70)
             user_input = input("\n💭 Your question: ").strip()
             
-            # Check for exit commands
+
             if user_input.lower() in ['quit', 'exit', 'q']:
                 print("\n👋 Thanks for chatting! Goodbye!\n")
                 break
             
-            # Skip empty input
+
             if not user_input:
                 print("⚠️  Please enter a question.")
                 continue
             
-            # Process the question
+
             chatbot.process_question(user_input)
             
         except KeyboardInterrupt:
